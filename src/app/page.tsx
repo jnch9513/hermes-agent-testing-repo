@@ -1,13 +1,22 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-
-type Entry = { userId: string; name: string; room: string | null };
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Separator } from "@/components/ui/separator";
+import {
+  useReconnectingSocket,
+  type ConnectionState,
+} from "@/lib/use-reconnecting-socket";
+import type { ClientFrame, PresenceUser, ServerFrame } from "@/lib/protocol";
 
 const ROOMS = [
-  { id: "poker-a", label: "房A · 撲克牌 🃏" },
-  { id: "chess-b", label: "房B · 象棋 ♟️" },
+  { id: "poker-a", label: "房A · 撲克牌", emoji: "🃏" },
+  { id: "chess-b", label: "房B · 象棋", emoji: "♟️" },
 ] as const;
 
 const KEY = "hw_user";
@@ -16,23 +25,24 @@ export default function Home() {
   const router = useRouter();
   const [me, setMe] = useState<{ userId: string; name: string } | null>(null);
   const [nameInput, setNameInput] = useState("");
-  const [users, setUsers] = useState<Entry[]>([]);
+  const [users, setUsers] = useState<PresenceUser[]>([]);
   const [room, setRoom] = useState<string | null>(null);
-  const timer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [conn, setConn] = useState<ConnectionState>("connecting");
+  const helloSent = useRef(false);
 
-  const beat = useCallback(async (userId: string, name: string, room: string | null) => {
+  const onMessage = (data: string) => {
     try {
-      await fetch("/api/presence", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userId, name, room }),
-      });
-      const res = await fetch("/api/presence", { cache: "no-store" });
-      const data = await res.json();
-      setUsers(data.users ?? []);
+      const frame = JSON.parse(data) as ServerFrame;
+      if (frame.type === "presence") setUsers(frame.users);
     } catch {}
-  }, []);
+  };
+  const { connectionState, send } = useReconnectingSocket(
+    () => `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/ws`,
+    onMessage
+  );
+  useEffect(() => setConn(connectionState), [connectionState]);
 
+  // login
   const login = () => {
     const name = nameInput.trim();
     if (!name) return;
@@ -46,122 +56,161 @@ export default function Home() {
     if (saved) setMe(JSON.parse(saved));
   }, []);
 
-  // heartbeat + poll every 3s
+  // send hello once socket is open + we know who we are
   useEffect(() => {
-    if (!me) return;
-    beat(me.userId, me.name, room);
-    timer.current = setInterval(() => beat(me.userId, me.name, room), 3000);
-    return () => {
-      if (timer.current) clearInterval(timer.current);
-    };
-  }, [me, room, beat]);
+    if (!me || conn !== "connected") return;
+    send(
+      JSON.stringify({
+        type: "hello",
+        clientId: me.userId,
+        name: me.name,
+      } satisfies ClientFrame)
+    );
+  }, [me, conn, send]);
 
-  const joinRoom = (id: string) => {
+  // re-announce room after reconnect (hello resets room to lobby server-side)
+  useEffect(() => {
+    if (!me || conn !== "connected") return;
+    if (helloSent.current) {
+      send(JSON.stringify({ type: "join room", room }));
+    } else {
+      helloSent.current = true;
+    }
+  }, [me, conn, room, send]);
+
+  const joinRoom = (id: string | null) => {
     setRoom(id);
-    router.push(`/?room=${id}`);
-  };
-  const leaveRoom = () => {
-    setRoom(null);
-    router.push("/");
+    send(JSON.stringify({ type: "join room", room: id } satisfies ClientFrame));
+    router.push(id ? `/?room=${id}` : "/");
   };
 
   if (!me) {
     return (
-      <main className="flex min-h-screen items-center justify-center bg-zinc-950">
-        <div className="flex w-80 flex-col gap-4 rounded-2xl bg-zinc-900 p-8">
-          <h1 className="text-2xl font-bold text-white">入嚟玩 🎮</h1>
-          <input
-            value={nameInput}
-            onChange={(e) => setNameInput(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && login()}
-            placeholder="你個名"
-            className="rounded-lg bg-zinc-800 px-4 py-2 text-white outline-none focus:ring-2 focus:ring-emerald-500"
-          />
-          <button
-            onClick={login}
-            className="rounded-lg bg-emerald-600 py-2 font-semibold text-white hover:bg-emerald-500"
-          >
-            進入
-          </button>
-        </div>
+      <main className="flex min-h-screen items-center justify-center bg-background">
+        <Card className="w-80">
+          <CardHeader>
+            <CardTitle className="text-xl">🎮 入嚟玩</CardTitle>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-3">
+            <Input
+              value={nameInput}
+              onChange={(e) => setNameInput(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && login()}
+              placeholder="你個名"
+            />
+            <Button onClick={login}>進入大廳</Button>
+          </CardContent>
+        </Card>
       </main>
     );
   }
 
-  const online = users;
+  const inLobbyCount = users.filter((u) => !u.room || u.room === "lobby").length;
 
   return (
-    <main className="mx-auto flex min-h-screen max-w-3xl flex-col gap-6 p-6 text-white">
+    <main className="mx-auto flex min-h-screen max-w-3xl flex-col gap-5 p-6 bg-background text-foreground">
       <header className="flex items-center justify-between">
-        <h1 className="text-xl font-bold">🎮 大廳</h1>
-        <span className="text-sm text-zinc-400">
-          你: <b className="text-emerald-400">{me.name}</b>
-          {room && ` · 在 ${ROOMS.find((r) => r.id === room)?.label ?? room}`}
-        </span>
+        <h1 className="text-lg font-bold tracking-tight">🎮 遊戲大廳</h1>
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <span
+            className={`h-2 w-2 rounded-full ${
+              conn === "connected"
+                ? "bg-emerald-500"
+                : conn === "connecting"
+                  ? "animate-pulse bg-amber-500"
+                  : "bg-red-500"
+            }`}
+            title={conn}
+          />
+          <Avatar className="h-7 w-7">
+            <AvatarFallback className="bg-emerald-600 text-xs text-white">
+              {me.name.slice(0, 2)}
+            </AvatarFallback>
+          </Avatar>
+          {me.name}
+        </div>
       </header>
+      <Separator />
 
       {/* Online list */}
-      <section className="rounded-2xl bg-zinc-900 p-5">
-        <h2 className="mb-3 text-sm font-semibold tracking-wide text-zinc-400 uppercase">
-          緊上線 {online.length} 人
-        </h2>
-        <ul className="flex flex-wrap gap-2">
-          {online.map((u) => {
-            const inRoom = u.room && u.room !== "lobby" ? ROOMS.find((r) => r.id === u.room)?.label : null;
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
+            緊上線
+            <Badge variant="secondary">{users.length}</Badge>
+            <span className="text-xs">· 大廳 {inLobbyCount}</span>
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="flex flex-wrap gap-2 pt-0">
+          {users.map((u) => {
+            const roomLabel =
+              u.room && u.room !== "lobby"
+                ? ROOMS.find((r) => r.id === u.room)?.label
+                : null;
             return (
-              <li
-                key={u.userId}
-                className="flex items-center gap-2 rounded-full bg-zinc-800 px-3 py-1.5 text-sm"
-              >
-                <span className="h-2 w-2 animate-pulse rounded-full bg-emerald-400" />
+              <Badge key={u.clientId} variant="outline" className="gap-1.5 px-3 py-1.5 text-sm">
+                <span
+                  className={`h-2 w-2 rounded-full ${
+                    roomLabel ? "bg-amber-500" : "animate-pulse bg-emerald-500"
+                  }`}
+                />
                 {u.name}
-                {inRoom && <span className="text-xs text-amber-400">· {inRoom}</span>}
-                {u.userId === me.userId && <span className="text-xs text-zinc-500">(你)</span>}
-              </li>
+                {u.clientId === me.userId && <span className="text-muted-foreground">(你)</span>}
+                {roomLabel && (
+                  <span className="font-medium text-amber-600 dark:text-amber-400">
+                    · {roomLabel}
+                  </span>
+                )}
+              </Badge>
             );
           })}
-          {online.length === 0 && <li className="text-sm text-zinc-500">冇人喺線…</li>}
-        </ul>
-      </section>
+          {users.length === 0 && <p className="text-sm text-muted-foreground">冇人喺線…</p>}
+        </CardContent>
+      </Card>
 
       {/* Rooms */}
-      <section className="grid gap-3 sm:grid-cols-2">
+      <div className="grid gap-4 sm:grid-cols-2">
         {ROOMS.map((r) => {
-          const count = users.filter((u) => u.room === r.id).length;
+          const members = users.filter((u) => u.room === r.id);
           const inside = room === r.id;
           return (
-            <div
+            <Card
               key={r.id}
-              className={`rounded-2xl border p-5 ${
-                inside ? "border-emerald-500 bg-zinc-800" : "border-zinc-800 bg-zinc-900"
-              }`}
+              className={inside ? "border-emerald-500 ring-1 ring-emerald-500/40" : ""}
             >
-              <div className="flex items-center justify-between">
-                <h3 className="font-semibold">{r.label}</h3>
-                <span className="text-xs text-zinc-400">{count} 人</span>
-              </div>
-              {inside ? (
-                <>
-                  <p className="mt-3 text-sm text-zinc-400">你已經喺呢間房。</p>
-                  <button
-                    onClick={leaveRoom}
-                    className="mt-3 rounded-lg bg-zinc-700 px-4 py-1.5 text-sm hover:bg-zinc-600"
-                  >
+              <CardHeader className="pb-2">
+                <CardTitle className="flex items-center justify-between text-base">
+                  <span>
+                    {r.emoji} {r.label}
+                  </span>
+                  <Badge variant={inside ? "default" : "secondary"}>{members.length} 人</Badge>
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="pt-0">
+                {members.length > 0 && (
+                  <div className="mb-3 flex flex-wrap gap-1">
+                    {members.map((m) => (
+                      <span key={m.clientId} className="text-xs text-muted-foreground">
+                        {m.name}
+                        {m.clientId === me.userId && "(你)"}
+                      </span>
+                    ))}
+                  </div>
+                )}
+                {inside ? (
+                  <Button variant="outline" size="sm" onClick={() => joinRoom(null)}>
                     離開房
-                  </button>
-                </>
+                  </Button>
                 ) : (
-                <button
-                  onClick={() => joinRoom(r.id)}
-                  className="mt-3 rounded-lg bg-emerald-600 px-4 py-1.5 text-sm font-medium hover:bg-emerald-500"
-                >
-                  入房
-                </button>
-              )}
-            </div>
+                  <Button size="sm" onClick={() => joinRoom(r.id)}>
+                    入房
+                  </Button>
+                )}
+              </CardContent>
+            </Card>
           );
         })}
-      </section>
+      </div>
     </main>
   );
 }
