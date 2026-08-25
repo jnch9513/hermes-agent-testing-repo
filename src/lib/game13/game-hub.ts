@@ -109,7 +109,10 @@ export class GameHub {
       switch (msg.type) {
         case "game:create": {
           const existing = await this.store.load(roomId);
-          if (!existing || existing.phase === "scored") {
+          // Only create when there's no game at all. Scored games are reset by
+          // 再嚟一鋪 flow via game:join (auto-restart); waiting/picking games
+          // keep their seated players.
+          if (!existing) {
             await this.persist(createGame(roomId));
             this.cache.delete(roomId);
           }

@@ -267,7 +267,7 @@ export default function GameRoom() {
               onClick={() =>
                 act(
                   (game?.players.length ?? 0) === 0
-                    ? { type: "game:create" }
+                    ? { type: "game:join", name: me.name }
                     : { type: "game:start" }
                 )
               }
