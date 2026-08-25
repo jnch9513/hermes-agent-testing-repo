@@ -212,6 +212,19 @@ export class GameHub {
     await this.store.save(state);
   }
 
+  /** Mark a player offline in the game state (WS closed mid-game). */
+  async markOffline(roomId: string, clientId: string): Promise<void> {
+    const state = this.cache.get(roomId) ?? (await this.store.load(roomId));
+    if (!state || state.phase === "waiting" || state.phase === "scored") return;
+    const p = state.players.find((pl) => pl.clientId === clientId);
+    if (p && p.online) {
+      p.online = false;
+      await this.persist(state);
+      await this.publishChanged(roomId);
+      await this.pushSnapshot(roomId);
+    }
+  }
+
   private async publishChanged(roomId: string): Promise<void> {
     if (!this.pub) return;
     try {

@@ -73,7 +73,7 @@ export class PresenceHub {
   // client resending hello.
   private readonly infoByClient = new Map<string, { name: string; room: string | null }>()
 
-  handleConnection(ws: WebSocket, gameHub?: { handleMessage: (roomId: string, ws: WebSocket, raw: unknown) => Promise<void>; registerSocket: (roomId: string, ws: WebSocket) => void; bindClient: (roomId: string, ws: WebSocket, clientId: string) => void; unregisterSocket: (roomId: string, ws: WebSocket) => void }) {
+  handleConnection(ws: WebSocket, gameHub?: { handleMessage: (roomId: string, ws: WebSocket, raw: unknown) => Promise<void>; registerSocket: (roomId: string, ws: WebSocket) => void; bindClient: (roomId: string, ws: WebSocket, clientId: string) => void; unregisterSocket: (roomId: string, ws: WebSocket) => void; markOffline?: (roomId: string, clientId: string) => Promise<void> }) {
     this.localClients.set(ws, { clientId: null })
     // Room the socket most recently joined (for game message routing).
     let currentGameRoom: string | null = null
@@ -134,7 +134,10 @@ export class PresenceHub {
     ws.on('close', async () => {
       const state = this.localClients.get(ws)
       this.localClients.delete(ws)
-      if (gameHub && currentGameRoom) gameHub.unregisterSocket(currentGameRoom, ws)
+      if (gameHub && currentGameRoom) {
+        gameHub.unregisterSocket(currentGameRoom, ws)
+        if (state?.clientId) await gameHub.markOffline?.(currentGameRoom, state.clientId)
+      }
       if (state?.clientId) {
         this.infoByClient.delete(state.clientId)
         await this.store.remove([state.clientId])
