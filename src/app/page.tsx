@@ -6,7 +6,6 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Separator } from "@/components/ui/separator";
 import {
   useReconnectingSocket,
@@ -109,9 +108,9 @@ export default function Home() {
 
   return (
     <main className="mx-auto flex min-h-screen max-w-3xl flex-col gap-5 p-6 bg-background text-foreground">
-      <header className="flex items-center justify-between">
-        <h1 className="text-lg font-bold tracking-tight">🎮 遊戲大廳</h1>
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+      <header className="flex items-center justify-between gap-3">
+        <h1 className="text-lg font-bold tracking-tight whitespace-nowrap">🎮 遊戲大廳</h1>
+        <div className="flex shrink-0 items-center gap-2 text-sm text-muted-foreground">
           <span
             className={`h-2 w-2 rounded-full ${
               conn === "connected"
@@ -122,11 +121,6 @@ export default function Home() {
             }`}
             title={conn}
           />
-          <Avatar className="h-7 w-7">
-            <AvatarFallback className="bg-emerald-600 text-xs text-white">
-              {me.name.slice(0, 2)}
-            </AvatarFallback>
-          </Avatar>
           {me.name}
         </div>
       </header>
@@ -135,7 +129,7 @@ export default function Home() {
       {/* Online list */}
       <Card>
         <CardHeader className="pb-3">
-          <CardTitle className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
+          <CardTitle className="flex items-center gap-2 whitespace-nowrap text-sm font-medium text-muted-foreground">
             緊上線
             <Badge variant="secondary">{users.length}</Badge>
             <span className="text-xs">· 大廳 {inLobbyCount}</span>
@@ -148,16 +142,20 @@ export default function Home() {
                 ? ROOMS.find((r) => r.id === u.room)?.label
                 : null;
             return (
-              <Badge key={u.clientId} variant="outline" className="gap-1.5 px-3 py-1.5 text-sm">
+              <Badge
+                key={u.clientId}
+                variant="outline"
+                className="max-w-full gap-1.5 px-3 py-1.5 text-sm"
+              >
                 <span
-                  className={`h-2 w-2 rounded-full ${
+                  className={`h-2 w-2 shrink-0 rounded-full ${
                     roomLabel ? "bg-amber-500" : "animate-pulse bg-emerald-500"
                   }`}
                 />
-                {u.name}
+                <span className="truncate">{u.name}</span>
                 {u.clientId === me.userId && <span className="text-muted-foreground">(你)</span>}
                 {roomLabel && (
-                  <span className="font-medium text-amber-600 dark:text-amber-400">
+                  <span className="whitespace-nowrap font-medium text-amber-600 dark:text-amber-400">
                     · {roomLabel}
                   </span>
                 )}
@@ -169,26 +167,23 @@ export default function Home() {
       </Card>
 
       {/* Rooms */}
-      <div className="grid gap-4 sm:grid-cols-2">
+      <div className="grid gap-4 grid-cols-1 xs:grid-cols-2 sm:grid-cols-2">
         {ROOMS.map((r) => {
           const members = users.filter((u) => u.room === r.id);
           const inside = room === r.id;
           return (
             <Card
               key={r.id}
-              className={inside ? "border-emerald-500 ring-1 ring-emerald-500/40" : ""}
+              className={`min-w-0 ${inside ? "border-emerald-500 ring-1 ring-emerald-500/40" : ""}`}
             >
               <CardHeader className="pb-2">
-                <CardTitle className="flex items-center justify-between text-base">
-                  <span>
-                    {r.emoji} {r.label}
-                  </span>
-                  <Badge variant={inside ? "default" : "secondary"}>{members.length} 人</Badge>
+                <CardTitle className="whitespace-nowrap text-base">
+                  {r.emoji} {r.label}
                 </CardTitle>
               </CardHeader>
               <CardContent className="pt-0">
                 {members.length > 0 && (
-                  <div className="mb-3 flex flex-wrap gap-1">
+                  <div className="mb-3 flex flex-wrap gap-x-2">
                     {members.map((m) => (
                       <span key={m.clientId} className="text-xs text-muted-foreground">
                         {m.name}
@@ -197,15 +192,20 @@ export default function Home() {
                     ))}
                   </div>
                 )}
-                {inside ? (
-                  <Button variant="outline" size="sm" onClick={() => joinRoom(null)}>
-                    離開房
-                  </Button>
-                ) : (
-                  <Button size="sm" onClick={() => joinRoom(r.id)}>
-                    入房
-                  </Button>
-                )}
+                <div className="flex items-center gap-3">
+                  {inside ? (
+                    <Button variant="outline" size="sm" onClick={() => joinRoom(null)}>
+                      離開房
+                    </Button>
+                  ) : (
+                    <Button size="sm" className="whitespace-nowrap" onClick={() => joinRoom(r.id)}>
+                      入房
+                    </Button>
+                  )}
+                  <Badge variant="secondary" className="shrink-0">
+                    {members.length} 人
+                  </Badge>
+                </div>
               </CardContent>
             </Card>
           );

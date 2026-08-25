@@ -40,3 +40,9 @@ curl -sL https://hermes-agent-testing-repo.vercel.app/ | grep -io 'hello world' 
 - Vercel framework 一定要係 `nextjs`（試過變咗 None 導致 deploy 空 build → 全站 404）。404 就查 project settings。
 - Push 前先確認 `npm run build` 過（deploy.sh 內置）。
 - Git push 用 remote `origin`；credential 已存 osxkeychain。
+
+## WebSocket 注意
+
+- `/api/ws` 用 `experimental_upgradeWebSocket()`（@vercel/functions）— **本地 `next dev` 行唔到 WS upgrade**（handshake fail 係正常），要 `vercel dev` 或直接測 prod。
+- Presence 狀態喺 Redis（REDIS_URL env，ZSET+HASH）；未設 REDIS_URL 時 fallback in-memory（單 instance 先 work）。跨 instance 要加 Vercel Marketplace Redis / Upstash 再設 env。
+- Headless 測試 script：`~/.hermes/scripts/presence-ws-test.js`（BASE_URL 環境變數切換目標）。
