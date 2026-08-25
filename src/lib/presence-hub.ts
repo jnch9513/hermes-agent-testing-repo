@@ -73,11 +73,22 @@ export class PresenceHub {
   // client resending hello.
   private readonly infoByClient = new Map<string, { name: string; room: string | null }>()
 
-  handleConnection(ws: WebSocket) {
+  handleConnection(ws: WebSocket, gameHub?: { handleMessage: (roomId: string, ws: WebSocket, raw: unknown) => Promise<void>; registerSocket: (roomId: string, ws: WebSocket) => void; bindClient: (roomId: string, ws: WebSocket, clientId: string) => void; unregisterSocket: (roomId: string, ws: WebSocket) => void }) {
     this.localClients.set(ws, { clientId: null })
+    // Room the socket most recently joined (for game message routing).
+    let currentGameRoom: string | null = null
 
     ws.on('message', async (data) => {
-      const frame = parseClientFrame(typeof data === 'string' ? data : String(data))
+      const raw = typeof data === 'string' ? data : String(data)
+
+      // Game frames start with "game:" — route to the game hub.
+      if (raw.includes('"type":"game:') || raw.includes('"type": "game:')) {
+        if (!gameHub || !currentGameRoom) return
+        await gameHub.handleMessage(currentGameRoom, ws, raw)
+        return
+      }
+
+      const frame = parseClientFrame(raw)
       if (!frame) return
       const state = this.localClients.get(ws)
       if (!state) return
@@ -86,6 +97,12 @@ export class PresenceHub {
         state.clientId = frame.clientId
         this.infoByClient.set(frame.clientId, { name: frame.name, room: null })
         await this.store.touch([[frame.clientId, { name: frame.name, room: null }]])
+        if (gameHub) {
+          // Default game room binding: poker-a hosts Lucky 13.
+          currentGameRoom = 'poker-a'
+          gameHub.registerSocket(currentGameRoom, ws)
+          gameHub.bindClient(currentGameRoom, ws, frame.clientId)
+        }
         await this.broadcastPresence()
       }
 
@@ -93,6 +110,19 @@ export class PresenceHub {
         const info = this.infoByClient.get(state.clientId)
         if (info) {
           info.room = frame.room
+          if (gameHub) {
+            // Rebind game socket when moving between rooms.
+            if (currentGameRoom && currentGameRoom !== frame.room) {
+              gameHub.unregisterSocket(currentGameRoom, ws)
+            }
+            if (frame.room === 'poker-a' || frame.room === 'chess-b') {
+              currentGameRoom = frame.room
+              gameHub.registerSocket(currentGameRoom, ws)
+              gameHub.bindClient(currentGameRoom, ws, state.clientId)
+            } else {
+              currentGameRoom = null
+            }
+          }
           await this.store.touch([[state.clientId, info]])
           await this.broadcastPresence()
         }
@@ -102,6 +132,7 @@ export class PresenceHub {
     ws.on('close', async () => {
       const state = this.localClients.get(ws)
       this.localClients.delete(ws)
+      if (gameHub && currentGameRoom) gameHub.unregisterSocket(currentGameRoom, ws)
       if (state?.clientId) {
         this.infoByClient.delete(state.clientId)
         await this.store.remove([state.clientId])
