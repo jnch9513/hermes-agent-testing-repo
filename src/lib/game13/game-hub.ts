@@ -111,6 +111,7 @@ export class GameHub {
           const existing = await this.store.load(roomId);
           if (!existing || existing.phase === "scored") {
             await this.persist(createGame(roomId));
+            this.cache.delete(roomId);
           }
           break;
         }
