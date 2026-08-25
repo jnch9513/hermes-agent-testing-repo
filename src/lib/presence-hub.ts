@@ -83,8 +83,10 @@ export class PresenceHub {
 
       // Game frames start with "game:" — route to the game hub.
       if (raw.includes('"type":"game:') || raw.includes('"type": "game:')) {
-        if (!gameHub || !currentGameRoom) return
-        await gameHub.handleMessage(currentGameRoom, ws, raw)
+        if (!gameHub) return
+        // Default to poker-a if hello hasn't bound a room yet (race on connect).
+        const room = currentGameRoom ?? 'poker-a'
+        await gameHub.handleMessage(room, ws, raw)
         return
       }
 
