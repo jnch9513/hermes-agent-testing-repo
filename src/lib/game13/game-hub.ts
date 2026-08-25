@@ -123,6 +123,14 @@ export class GameHub {
             await this.persist(state);
             this.cache.delete(roomId);
           }
+          // Stale-game recovery: everyone left mid-game → start fresh.
+          const allOffline =
+            state.players.length > 0 && state.players.every((p) => !p.online);
+          if (allOffline && state.phase !== "waiting") {
+            state = createGame(roomId);
+            await this.persist(state);
+            this.cache.delete(roomId);
+          }
           joinGame(state, clientId!, String(msg.name ?? "?").slice(0, 32));
           await this.persist(state);
           break;
