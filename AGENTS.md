@@ -44,5 +44,5 @@ curl -sL https://hermes-agent-testing-repo.vercel.app/ | grep -io 'hello world' 
 ## WebSocket 注意
 
 - `/api/ws` 用 `experimental_upgradeWebSocket()`（@vercel/functions）— **本地 `next dev` 行唔到 WS upgrade**（handshake fail 係正常），要 `vercel dev` 或直接測 prod。
-- Presence 狀態喺 Redis（REDIS_URL env，ZSET+HASH）；未設 REDIS_URL 時 fallback in-memory（單 instance 先 work）。跨 instance 要加 Vercel Marketplace Redis / Upstash 再設 env。
+- Presence 狀態喺 Redis（REDIS_URL env 已設，ZSET+HASH + pub/sub 跨 instance fan-out）；未設 REDIS_URL 時 fallback in-memory（單 instance 先 work）。
 - Headless 測試 script：`~/.hermes/scripts/presence-ws-test.js`（BASE_URL 環境變數切換目標）。

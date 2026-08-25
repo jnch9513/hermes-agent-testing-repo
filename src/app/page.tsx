@@ -11,6 +11,7 @@ import {
   useReconnectingSocket,
   type ConnectionState,
 } from "@/lib/use-reconnecting-socket";
+import { ThemeToggle } from "@/components/theme-toggle";
 import type { ClientFrame, PresenceUser, ServerFrame } from "@/lib/protocol";
 
 const ROOMS = [
@@ -110,7 +111,7 @@ export default function Home() {
     <main className="mx-auto flex min-h-screen max-w-3xl flex-col gap-5 p-6 bg-background text-foreground">
       <header className="flex items-center justify-between gap-3">
         <h1 className="text-lg font-bold tracking-tight whitespace-nowrap">🎮 遊戲大廳</h1>
-        <div className="flex shrink-0 items-center gap-2 text-sm text-muted-foreground">
+        <div className="flex shrink-0 items-center gap-3 text-sm text-muted-foreground">
           <span
             className={`h-2 w-2 rounded-full ${
               conn === "connected"
@@ -122,6 +123,7 @@ export default function Home() {
             title={conn}
           />
           {me.name}
+          <ThemeToggle />
         </div>
       </header>
       <Separator />
