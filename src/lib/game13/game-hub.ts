@@ -116,7 +116,13 @@ export class GameHub {
           break;
         }
         case "game:join": {
-          const state = await this.requireState(roomId);
+          let state = await this.store.load(roomId);
+          // Auto-restart flow: joining a scored/absent game starts a fresh one.
+          if (!state || state.phase === "scored") {
+            state = createGame(roomId);
+            await this.persist(state);
+            this.cache.delete(roomId);
+          }
           joinGame(state, clientId!, String(msg.name ?? "?").slice(0, 32));
           await this.persist(state);
           break;
