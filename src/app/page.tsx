@@ -129,7 +129,7 @@ export default function Home() {
       <Separator />
 
       {/* Online list */}
-      <Card>
+      <Card className="min-h-[7.5rem]">
         <CardHeader className="pb-3">
           <CardTitle className="flex items-center gap-2 whitespace-nowrap text-sm font-medium text-muted-foreground">
             緊上線
@@ -137,17 +137,16 @@ export default function Home() {
             <span className="text-xs">· 大廳 {inLobbyCount}</span>
           </CardTitle>
         </CardHeader>
-        <CardContent className="flex flex-wrap gap-2 pt-0">
+        <CardContent className="grid grid-cols-2 gap-2 pt-0 min-[480px]:grid-cols-3 sm:grid-cols-4">
           {users.map((u) => {
             const roomLabel =
               u.room && u.room !== "lobby"
                 ? ROOMS.find((r) => r.id === u.room)?.label
                 : null;
             return (
-              <Badge
+              <div
                 key={u.clientId}
-                variant="outline"
-                className="max-w-full gap-1.5 px-3 py-1.5 text-sm"
+                className="flex items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1.5 text-sm"
               >
                 <span
                   className={`h-2 w-2 shrink-0 rounded-full ${
@@ -155,16 +154,15 @@ export default function Home() {
                   }`}
                 />
                 <span className="truncate">{u.name}</span>
-                {u.clientId === me.userId && <span className="text-muted-foreground">(你)</span>}
-                {roomLabel && (
-                  <span className="whitespace-nowrap font-medium text-amber-600 dark:text-amber-400">
-                    · {roomLabel}
-                  </span>
+                {u.clientId === me.userId && (
+                  <span className="shrink-0 text-xs text-muted-foreground">(你)</span>
                 )}
-              </Badge>
+              </div>
             );
           })}
-          {users.length === 0 && <p className="text-sm text-muted-foreground">冇人喺線…</p>}
+          {users.length === 0 && (
+            <p className="col-span-full text-sm text-muted-foreground">冇人喺線…</p>
+          )}
         </CardContent>
       </Card>
 
@@ -176,25 +174,32 @@ export default function Home() {
           return (
             <Card
               key={r.id}
-              className={`min-w-0 ${inside ? "border-emerald-500 ring-1 ring-emerald-500/40" : ""}`}
+              className={`flex min-h-[9.5rem] min-w-0 flex-col ${
+                inside ? "border-emerald-500 ring-1 ring-emerald-500/40" : ""
+              }`}
             >
               <CardHeader className="pb-2">
                 <CardTitle className="whitespace-nowrap text-base">
                   {r.emoji} {r.label}
                 </CardTitle>
               </CardHeader>
-              <CardContent className="pt-0">
-                {members.length > 0 && (
-                  <div className="mb-3 flex flex-wrap gap-x-2">
-                    {members.map((m) => (
-                      <span key={m.clientId} className="text-xs text-muted-foreground">
-                        {m.name}
-                        {m.clientId === me.userId && "(你)"}
-                      </span>
-                    ))}
-                  </div>
-                )}
-                <div className="flex items-center gap-3">
+              <CardContent className="flex flex-1 flex-col pt-0">
+                {/* fixed-height member zone: 3 rows max, scroll beyond */}
+                <div className="mb-3 h-[3.25rem] overflow-y-auto">
+                  {members.length > 0 ? (
+                    <div className="flex flex-wrap gap-x-2 gap-y-0.5">
+                      {members.map((m) => (
+                        <span key={m.clientId} className="text-xs text-muted-foreground">
+                          {m.name}
+                          {m.clientId === me.userId && "(你)"}
+                        </span>
+                      ))}
+                    </div>
+                  ) : (
+                    <span className="text-xs text-muted-foreground">—</span>
+                  )}
+                </div>
+                <div className="mt-auto flex items-center gap-3">
                   {inside ? (
                     <Button variant="outline" size="sm" onClick={() => joinRoom(null)}>
                       離開房
