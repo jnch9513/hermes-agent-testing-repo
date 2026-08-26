@@ -95,10 +95,13 @@ export default function GameRoom() {
   // Nudge: when the timer hits 0 but nobody has acted since, keep pinging the
   // server so the lazy expiry settles the round (serverless has no timers).
   useEffect(() => {
-    if (game?.phase !== "picking") return;
-    const left = game.deadlineMs ? Math.ceil((game.deadlineMs - Date.now()) / 1000) : null;
-    if (left === null || left > 0) return;
-    const t = setInterval(() => send(JSON.stringify({ type: "game:nudge" })), 2000);
+    if (game?.phase !== "picking" || !game.deadlineMs) return;
+    const deadline = game.deadlineMs;
+    const t = setInterval(() => {
+      if (Date.now() >= deadline) {
+        send(JSON.stringify({ type: "game:nudge" }));
+      }
+    }, 2000);
     return () => clearInterval(t);
   }, [game?.phase, game?.deadlineMs, send]);
 
