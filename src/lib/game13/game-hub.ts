@@ -110,6 +110,18 @@ export class GameHub {
       // lock we always reload Redis truth (never trust the instance cache) so
       // multi-instance deployments can't double-deal via stale copies.
       await withLock(this.pub, roomId, async () => {
+        // Pre-step: if the current round's deadline already passed, settle it
+        // (auto-play remaining players, deal next round) BEFORE handling this
+        // message. Without this, a table where nobody clicks freezes at ⏱0s
+        // forever — failed actions used to throw before the expiry check ran.
+        const preState = await this.store.load(roomId);
+        if (preState && preState.phase === "picking" && isExpired(preState)) {
+          expireTimer(preState);
+          await this.maybeScore(preState);
+          await this.persist(preState);
+          await this.publishChanged(roomId);
+        }
+
         switch (msg.type) {
           case "game:create": {
             const existing = await this.store.load(roomId);
