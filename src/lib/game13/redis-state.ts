@@ -74,3 +74,55 @@ export class MemoryGameStore implements GameStore {
 export function createGameStore(redis: Redis | null): GameStore {
   return redis ? new RedisGameStore(redis) : new MemoryGameStore();
 }
+
+// ---- Distributed lock -------------------------------------------------------
+// Vercel functions scale horizontally: each WS connection can land on a
+// different instance, each with its own in-memory cache. Without a lock, lazy
+// timer expiry (expireTimer → beginRound) can run concurrently on stale copies
+// and last-writer-wins overwrites Redis — dealing cards twice and eventually
+// exhausting the deck ("not enough cards"). All mutations must serialize
+// through this lock.
+
+const LOCK_PREFIX = "game13:lock:";
+const LOCK_TTL_MS = 5000;
+const LOCK_WAIT_MS = 4000;
+const LOCK_RETRY_MS = 40;
+
+/** Lua: release only if we still own the lock (token match). */
+const RELEASE_IF_OWNED = `
+if redis.call("get", KEYS[1]) == ARGV[1] then
+  return redis.call("del", KEYS[1])
+else
+  return 0
+end`;
+
+export async function withLock<T>(
+  redis: Redis | null,
+  key: string,
+  fn: () => Promise<T>
+): Promise<T> {
+  if (!redis) return fn(); // memory store = single instance, no lock needed
+  const lockKey = LOCK_PREFIX + key;
+  const token = Math.random().toString(36).slice(2) + Date.now().toString(36);
+  const deadline = Date.now() + LOCK_WAIT_MS;
+
+  while (true) {
+    const got = await redis.set(lockKey, token, "PX", LOCK_TTL_MS, "NX");
+    if (got === "OK") {
+      try {
+        return await fn();
+      } finally {
+        try {
+          await redis.eval(RELEASE_IF_OWNED, 1, lockKey, token);
+        } catch {
+          /* lock expired mid-flight; TTL will clean up */
+        }
+      }
+    }
+    if (Date.now() > deadline) {
+      throw new Error("room busy — another action is being processed, try again");
+    }
+    await new Promise((r) => setTimeout(r, LOCK_RETRY_MS));
+  }
+}
+

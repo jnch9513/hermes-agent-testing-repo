@@ -17,7 +17,7 @@ import {
   computeScores,
   isExpired,
 } from "./engine";
-import { createGameStore, type GameStore } from "./redis-state";
+import { createGameStore, withLock, type GameStore } from "./redis-state";
 import { GameState, Phase, PlayerGameView } from "./types";
 
 const GAME_CHANNEL = "game13:events";
@@ -106,67 +106,72 @@ export class GameHub {
     const clientId = senderEntry?.clientId;
 
     try {
-      switch (msg.type) {
-        case "game:create": {
-          const existing = await this.store.load(roomId);
-          // Only create when there's no game at all. Scored games are reset by
-          // 再嚟一鋪 flow via game:join (auto-restart); waiting/picking games
-          // keep their seated players.
-          if (!existing) {
-            await this.persist(createGame(roomId));
-            this.cache.delete(roomId);
+      // All mutations serialize through a Redis lock keyed by room. Inside the
+      // lock we always reload Redis truth (never trust the instance cache) so
+      // multi-instance deployments can't double-deal via stale copies.
+      await withLock(this.pub, roomId, async () => {
+        switch (msg.type) {
+          case "game:create": {
+            const existing = await this.store.load(roomId);
+            // Only create when there's no game at all. Scored games are reset by
+            // 再嚟一鋪 flow via game:join (auto-restart); waiting/picking games
+            // keep their seated players.
+            if (!existing) {
+              await this.persist(createGame(roomId));
+              this.cache.delete(roomId);
+            }
+            break;
           }
-          break;
-        }
-        case "game:join": {
-          let state = await this.store.load(roomId);
-          // Auto-restart flow: joining a scored/absent game starts a fresh one.
-          if (!state || state.phase === "scored") {
-            state = createGame(roomId);
+          case "game:join": {
+            let state = await this.store.load(roomId);
+            // Auto-restart flow: joining a scored/absent game starts a fresh one.
+            if (!state || state.phase === "scored") {
+              state = createGame(roomId);
+              await this.persist(state);
+              this.cache.delete(roomId);
+            }
+            // Stale-game recovery: everyone left mid-game → start fresh.
+            const allOffline =
+              state.players.length > 0 && state.players.every((p) => !p.online);
+            if (allOffline && state.phase !== "waiting") {
+              state = createGame(roomId);
+              await this.persist(state);
+              this.cache.delete(roomId);
+            }
+            joinGame(state, clientId!, String(msg.name ?? "?").slice(0, 32));
             await this.persist(state);
-            this.cache.delete(roomId);
+            break;
           }
-          // Stale-game recovery: everyone left mid-game → start fresh.
-          const allOffline =
-            state.players.length > 0 && state.players.every((p) => !p.online);
-          if (allOffline && state.phase !== "waiting") {
-            state = createGame(roomId);
+          case "game:start": {
+            const state = await this.reloadForMutation(roomId);
+            startGame(state);
             await this.persist(state);
-            this.cache.delete(roomId);
+            break;
           }
-          joinGame(state, clientId!, String(msg.name ?? "?").slice(0, 32));
-          await this.persist(state);
-          break;
+          case "game:place": {
+            const state = await this.reloadForMutation(roomId);
+            placeCard(state, clientId!, msg.card, msg.lane);
+            await this.expireIfDue(state);
+            await this.persist(state);
+            break;
+          }
+          case "game:discard": {
+            const state = await this.reloadForMutation(roomId);
+            discardCard(state, clientId!, msg.card);
+            await this.persist(state);
+            break;
+          }
+          case "game:ready": {
+            const state = await this.reloadForMutation(roomId);
+            setReady(state, clientId!, true);
+            await this.maybeScore(state);
+            await this.persist(state);
+            break;
+          }
+          default:
+            return;
         }
-        case "game:start": {
-          const state = await this.requireState(roomId);
-          startGame(state);
-          await this.persist(state);
-          break;
-        }
-        case "game:place": {
-          const state = await this.requireState(roomId);
-          placeCard(state, clientId!, msg.card, msg.lane);
-          await this.expireIfDue(state);
-          await this.persist(state);
-          break;
-        }
-        case "game:discard": {
-          const state = await this.requireState(roomId);
-          discardCard(state, clientId!, msg.card);
-          await this.persist(state);
-          break;
-        }
-        case "game:ready": {
-          const state = await this.requireState(roomId);
-          setReady(state, clientId!, true);
-          await this.maybeScore(state);
-          await this.persist(state);
-          break;
-        }
-        default:
-          return;
-      }
+      });
 
       await this.publishChanged(roomId);
       await this.pushSnapshot(roomId);
@@ -211,21 +216,39 @@ export class GameHub {
     return state;
   }
 
+  /**
+   * Fresh state straight from Redis for a mutation (must be called while
+   * holding the room lock). Refreshes the instance cache with the truth so
+   * subsequent snapshots reflect the latest cross-instance writes.
+   */
+  private async reloadForMutation(roomId: string): Promise<GameState> {
+    const state = await this.store.load(roomId);
+    if (!state) throw new Error("no game in this room yet");
+    this.cache.set(roomId, state);
+    return state;
+  }
+
   private async persist(state: GameState): Promise<void> {
     await this.store.save(state);
   }
 
   /** Mark a player offline in the game state (WS closed mid-game). */
   async markOffline(roomId: string, clientId: string): Promise<void> {
-    const state = this.cache.get(roomId) ?? (await this.store.load(roomId));
+    const state = await this.reloadForMutation(roomId).catch(() => null);
     if (!state || state.phase === "waiting" || state.phase === "scored") return;
     const p = state.players.find((pl) => pl.clientId === clientId);
-    if (p && p.online) {
-      p.online = false;
-      await this.persist(state);
-      await this.publishChanged(roomId);
-      await this.pushSnapshot(roomId);
-    }
+    if (!p?.online) return;
+    await withLock(this.pub, roomId, async () => {
+      // Re-read inside the lock in case someone else mutated meanwhile.
+      const fresh = await this.store.load(roomId);
+      if (!fresh) return;
+      const fp = fresh.players.find((pl) => pl.clientId === clientId);
+      if (!fp?.online) return;
+      fp.online = false;
+      await this.persist(fresh);
+    });
+    await this.publishChanged(roomId);
+    await this.pushSnapshot(roomId);
   }
 
   private async publishChanged(roomId: string): Promise<void> {
@@ -249,12 +272,22 @@ export class GameHub {
 
     let state = this.cache.get(roomId) ?? (await this.store.load(roomId));
     if (!state) return;
-    this.cache.set(roomId, state);
 
-    // Lazy expiry on read path too.
-    const expired = await this.expireIfDue(state);
+    // Lazy expiry on read path must also serialize — expireTimer mutates and
+    // deals the next round, which races across instances otherwise.
+    const expired = await withLock(this.pub, roomId, async () => {
+      const fresh = await this.store.load(roomId);
+      if (!fresh) return false;
+      this.cache.set(roomId, fresh);
+      if (fresh.phase === "picking" && isExpired(fresh)) {
+        expireTimer(fresh);
+        await this.maybeScore(fresh);
+        await this.persist(fresh);
+        return true;
+      }
+      return false;
+    });
     if (expired) {
-      await this.persist(state);
       await this.publishChanged(roomId);
     }
 
