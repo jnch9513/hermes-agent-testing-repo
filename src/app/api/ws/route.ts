@@ -12,6 +12,12 @@ export function GET() {
     const redis = url ? new Redis(url, { lazyConnect: false, maxRetriesPerRequest: 5 }) : null
     if (redis) redis.on('error', (err) => console.error('[redis] game:', err.message))
 
-    getHub().handleConnection(ws, getGameHub(redis))
+    const gameHub = getGameHub(redis)
+    // Piggyback game-phase transitions on the presence heartbeat so rounds
+    // advance even when no client sends messages (serverless has no timers).
+    const presence = getHub()
+    presence.driveGameRooms = () => gameHub.driveAllRooms()
+
+    getHub().handleConnection(ws, gameHub)
   })
 }

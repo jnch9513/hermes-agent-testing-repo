@@ -281,6 +281,32 @@ export class GameHub {
     }
   }
 
+  /**
+   * Heartbeat hook (wired via presence-hub): drives lazy transitions for every
+   * active game room this instance knows about, so phases advance even when no
+   * client sends anything (serverless has no timers).
+   */
+  async driveAllRooms(): Promise<void> {
+    const roomIds = new Set<string>();
+    for (const roomId of this.sockets.keys()) roomIds.add(roomId);
+    for (const roomId of this.cache.keys()) roomIds.add(roomId);
+    for (const roomId of roomIds) {
+      try {
+        await withLock(this.pub, roomId, async () => {
+          const state = await this.store.load(roomId);
+          if (!state) return;
+          if (driveTransitions(state)) {
+            await this.persist(state);
+            await this.publishChanged(roomId);
+            await this.pushSnapshot(roomId);
+          }
+        });
+      } catch {
+        /* lock contention or transient Redis error — next tick retries */
+      }
+    }
+  }
+
   private async invalidateAndBroadcast(roomId: string): Promise<void> {
     this.cache.delete(roomId);
     await this.pushSnapshot(roomId);

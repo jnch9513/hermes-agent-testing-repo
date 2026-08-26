@@ -66,8 +66,19 @@ export class PresenceHub {
       } catch (err) {
         console.error('[presence] heartbeat:', (err as Error).message)
       }
+      // Drive game-room lazy transitions too: serverless instances have no
+      // timers of their own — without this a room nobody messages freezes at
+      // ⏱0s / 翻開中 forever (the nudge only fires while clients are open).
+      try {
+        await this.driveGameRooms?.()
+      } catch (err) {
+        console.error('[presence] game tick:', (err as Error).message)
+      }
     }, HEARTBEAT_MS)
   }
+
+  /** Optional hook so the game hub can piggyback on the presence heartbeat. */
+  driveGameRooms?: () => Promise<void>
 
   // clientId -> last known {name, room}; lets heartbeats re-touch without the
   // client resending hello.
