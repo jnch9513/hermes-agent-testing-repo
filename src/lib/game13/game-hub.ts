@@ -19,6 +19,7 @@ import {
   isExpired,
   isRevealDue,
   advanceFromReveal,
+  driveTransitions,
 } from "./engine";
 import { createGameStore, withLock, type GameStore } from "./redis-state";
 import { GameState, Phase, PlayerGameView } from "./types";
@@ -114,16 +115,10 @@ export class GameHub {
       // lock we always reload Redis truth (never trust the instance cache) so
       // multi-instance deployments can't double-deal via stale copies.
       await withLock(this.pub, roomId, async () => {
-        // Pre-step 1: settle an expired picking round (auto-play + face-up pause).
+        // Pre-step: drive all lazy transitions (expired picking → face-up
+        // reveal → next round / final scores) before handling this message.
         const preState = await this.store.load(roomId);
-        if (preState && preState.phase === "picking" && isExpired(preState)) {
-          expireTimer(preState);
-          await this.persist(preState);
-          await this.publishChanged(roomId);
-        }
-        // Pre-step 2: the round-end face-up pause is over → deal next round.
-        if (preState && isRevealDue(preState)) {
-          advanceFromReveal(preState);
+        if (preState && driveTransitions(preState)) {
           await this.persist(preState);
           await this.publishChanged(roomId);
         }
@@ -299,23 +294,13 @@ export class GameHub {
     let state = this.cache.get(roomId) ?? (await this.store.load(roomId));
     if (!state) return;
 
-    // Lazy expiry on read path must also serialize — expireTimer mutates and
-    // deals the next round, which races across instances otherwise. Also drives
-    // the round-end face-up pause → next-round deal.
+    // Read path must also serialize — transitions mutate state (auto-play,
+    // next-round deal, final scores) and would race across instances otherwise.
     const expired = await withLock(this.pub, roomId, async () => {
       const fresh = await this.store.load(roomId);
       if (!fresh) return false;
       this.cache.set(roomId, fresh);
-      let changed = false;
-      if (fresh.phase === "picking" && isExpired(fresh)) {
-        expireTimer(fresh);
-        changed = true;
-      }
-      if (isRevealDue(fresh)) {
-        advanceFromReveal(fresh);
-        changed = true;
-      }
-      if (changed) {
+      if (driveTransitions(fresh)) {
         await this.persist(fresh);
         return true; // publish outside the lock
       }

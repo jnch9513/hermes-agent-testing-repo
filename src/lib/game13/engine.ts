@@ -342,6 +342,33 @@ function finishGame(state: GameState): void {
   state.phase = "revealing";
 }
 
+/**
+ * Lazy transition driver, called on every locked mutation/read:
+ *  - picking + deadline passed → auto-play stragglers, enter face-up reveal
+ *  - revealing (mid-game) + pause over → deal next round
+ *  - revealing (game over) + pause over → compute final scores
+ */
+export function driveTransitions(state: GameState): boolean {
+  let changed = false;
+  if (state.phase === "picking" && isExpired(state)) {
+    expireTimer(state);
+    changed = true;
+  }
+  if (state.phase === "revealing") {
+    const due = state.revealUntilMs === null || Date.now() >= state.revealUntilMs;
+    if (!due) return changed;
+    if (state.finalLanes) {
+      // Game over: pause elapsed → show scores.
+      computeScores(state);
+      changed = true;
+    } else {
+      advanceFromReveal(state);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 /** Compute scores once revealing is done (called by hub after reveal delay). */
 export function computeScores(state: GameState): GameState {
   if (state.phase !== "revealing" || !state.finalLanes) throw new Error("not in reveal phase");
