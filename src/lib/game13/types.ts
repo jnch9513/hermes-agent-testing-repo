@@ -18,11 +18,18 @@ export interface PlayerGameView {
   /** Cards currently in hand (only meaningful for the owning player's view). */
   hand: Card[];
   /** Cards placed on the board so far — public info. */
-  placed: { lane: Lane; card: Card }[];
+  placed: PlacedEntry[];
   /** Cards placed THIS round (reset each deal). */
   placedThisRound: number;
   ready: boolean;
   online: boolean;
+}
+
+/** A card sitting in a lane. `round` marks which round placed it (locks older ones). */
+export interface PlacedEntry {
+  lane: Lane;
+  card: Card;
+  round?: number;
 }
 
 export interface RoundInfo {
@@ -42,6 +49,13 @@ export interface GameState {
   drawPile: Card[];
   discardPile: Card[];
   round: RoundInfo | null;
+  /**
+   * Round-end face-up pause: while set (phase=revealing), all placements are
+   * public. When Date.now() passes it, the hub deals the next round
+   * (pendingNextRound) or finishes the game if it's past round 5.
+   */
+  revealUntilMs: number | null;
+  pendingNextRound: number | null;
   /** Per-player lanes once all 13 cards are down (post game). */
   finalLanes: Record<string, { top: Card[]; middle: Card[]; bottom: Card[] }> | null;
   scores: Record<string, number> | null;
@@ -62,7 +76,11 @@ export const ROUND_PLAN = [
   { round: 5, deal: 0, mustPlace: 2, mustDiscard: false }, // dealt from discard pile only
 ] as const;
 
-export const ROUND_SECONDS = 30;
+/** Seconds per picking round (KC: 30 太少 → 60). */
+export const ROUND_SECONDS = 60;
+
+/** Pause after a round resolves: everyone's placements flip face-up for all. */
+export const REVEAL_PAUSE_MS = 10000;
 
 /** Max cards per lane across the whole game. */
 export const LANE_CAPACITY: Record<Lane, number> = {

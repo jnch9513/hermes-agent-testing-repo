@@ -1,6 +1,11 @@
-// Deterministic full-game engine sim: 4 players, 5 rounds, verify card accounting.
+// Deterministic full-game engine sim: 4 players, 5 rounds, verify card accounting
+// under the NEW rules (no discard UI; leftover hand swept at round end;
+// round-end face-up pause between rounds).
 // Run: npx tsx scripts/game13-sim.ts
-import { createGame, joinGame, startGame, placeCard, discardCard, setReady } from "../src/lib/game13/engine";
+import {
+  createGame, joinGame, startGame, placeCard, unplaceCard, setReady,
+  isRevealDue, advanceFromReveal,
+} from "../src/lib/game13/engine";
 import { GameState } from "../src/lib/game13/types";
 
 function totalCards(s: GameState): number {
@@ -14,45 +19,62 @@ let s = createGame("sim");
 for (const id of ids) joinGame(s, id, id);
 s = startGame(s);
 
-for (let round = 1; round <= 5; round++) {
-  // Play until every player has placed mustPlace (+discard if required), then ready.
+let roundNum = 0;
+while (s.phase !== "revealing" || s.finalLanes === null) {
+  if (s.phase !== "picking") break;
+  roundNum = s.round!.round;
   let guard = 0;
-  while (guard++ < 200) {
-    const allDone = s.players.every((p) => {
-      if (!s.round) return true;
-      return p.placedThisRound >= s.round.mustPlace && (!s.round.mustDiscard || p.hand.length === 0);
-    });
+
+  // Play: place mustPlace cards each (with one unplace/re-place to test pullback),
+  // then ready. No discard action (new rules).
+  while (guard++ < 300) {
+    const allDone = s.players.every(
+      (p) => p.placedThisRound >= s.round!.mustPlace && p.ready
+    );
     if (allDone) break;
     for (const p of s.players) {
-      if (!s.round) continue;
-      while (p.placedThisRound < s.round.mustPlace && p.hand.length > 0) {
+      while (p.placedThisRound < s.round!.mustPlace && p.hand.length > 0) {
         const caps = { top: 3, middle: 5, bottom: 5 } as const;
         const lane = (["bottom", "middle", "top"] as const).find(
           (l) => p.placed.filter((pl) => pl.lane === l).length < caps[l]
         );
         if (!lane) break;
-        try {
-          placeCard(s, p.clientId, p.hand[0], lane);
-        } catch {
-          break;
+        placeCard(s, p.clientId, p.hand[0], lane);
+        // Test pull-back once per player per game (first placement of R2):
+        if (roundNum === 2 && p.placedThisRound === 1 && !p.hand.includes(p.hand[0])) {
+          const last = p.placed[p.placed.length - 1];
+          unplaceCard(s, p.clientId, last.card, last.lane);
+          placeCard(s, p.clientId, last.card, lane); // put it back
         }
       }
-      if (s.round.mustDiscard && p.placedThisRound >= s.round.mustPlace && p.hand.length > 0) {
-        discardCard(s, p.clientId, p.hand[0]);
+      if (p.placedThisRound >= s.round!.mustPlace && !p.ready) {
+        setReady(s, p.clientId, true); // leftover card stays in hand — no discard needed
       }
     }
   }
-  for (const p of s.players) setReady(s, p.clientId, true);
-  const total = totalCards(s);
+
+  // Round ends → revealing pause → advance.
+  const totalAfterRound = totalCards(s);
   console.log(
-    `after R${round}: phase=${s.phase} round=${s.round?.round ?? "-"} totalCards=${total}` +
-      (total !== 52 ? ` ⚠️ CARD LEAK (${52 - total})` : " ✓")
+    `R${roundNum} done: phase=${s.phase} reveal=${s.revealUntilMs ? "yes" : "no"} totalCards=${totalAfterRound}` +
+      (totalAfterRound !== 52 ? ` ⚠️ LEAK ${totalAfterRound - 52}` : " ✓")
   );
+  const phaseAfter = s.phase as string;
+  if (phaseAfter === "revealing") {
+    (s as { revealUntilMs: number | null }).revealUntilMs = Date.now() - 1; // force due
+    s = advanceFromReveal(s);
+  }
   if (s.phase !== "picking") break;
 }
-console.log("final:", s.phase, "| scores computed by hub after reveal");
-if (totalCards(s) !== 52) {
+
+const finalTotal = totalCards(s);
+console.log(`final: phase=${s.phase} totalCards=${finalTotal}`);
+if (finalTotal !== 52) {
   console.error("FAIL: cards lost");
+  process.exit(1);
+}
+if (s.phase !== "revealing" || !s.finalLanes) {
+  console.error("FAIL: game did not finish");
   process.exit(1);
 }
 console.log("SIM PASS ✓");

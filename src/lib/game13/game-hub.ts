@@ -11,11 +11,14 @@ import {
   joinGame,
   startGame,
   placeCard,
+  unplaceCard,
   discardCard,
   setReady,
   expireTimer,
   computeScores,
   isExpired,
+  isRevealDue,
+  advanceFromReveal,
 } from "./engine";
 import { createGameStore, withLock, type GameStore } from "./redis-state";
 import { GameState, Phase, PlayerGameView } from "./types";
@@ -27,7 +30,8 @@ export interface SafePlayerView {
   clientId: string;
   name: string;
   handCount: number;
-  placed: { lane: string; card: Card2 }[];
+  placedThisRound: number;
+  placed: { lane: string; card: Card2 | null; round?: number }[];
   ready: boolean;
   online: boolean;
 }
@@ -110,14 +114,16 @@ export class GameHub {
       // lock we always reload Redis truth (never trust the instance cache) so
       // multi-instance deployments can't double-deal via stale copies.
       await withLock(this.pub, roomId, async () => {
-        // Pre-step: if the current round's deadline already passed, settle it
-        // (auto-play remaining players, deal next round) BEFORE handling this
-        // message. Without this, a table where nobody clicks freezes at ⏱0s
-        // forever — failed actions used to throw before the expiry check ran.
+        // Pre-step 1: settle an expired picking round (auto-play + face-up pause).
         const preState = await this.store.load(roomId);
         if (preState && preState.phase === "picking" && isExpired(preState)) {
           expireTimer(preState);
-          await this.maybeScore(preState);
+          await this.persist(preState);
+          await this.publishChanged(roomId);
+        }
+        // Pre-step 2: the round-end face-up pause is over → deal next round.
+        if (preState && isRevealDue(preState)) {
+          advanceFromReveal(preState);
           await this.persist(preState);
           await this.publishChanged(roomId);
         }
@@ -164,6 +170,13 @@ export class GameHub {
           case "game:place": {
             const state = await this.reloadForMutation(roomId);
             placeCard(state, clientId!, msg.card, msg.lane);
+            await this.expireIfDue(state);
+            await this.persist(state);
+            break;
+          }
+          case "game:unplace": {
+            const state = await this.reloadForMutation(roomId);
+            unplaceCard(state, clientId!, msg.card, msg.lane);
             await this.expireIfDue(state);
             await this.persist(state);
             break;
@@ -287,16 +300,24 @@ export class GameHub {
     if (!state) return;
 
     // Lazy expiry on read path must also serialize — expireTimer mutates and
-    // deals the next round, which races across instances otherwise.
+    // deals the next round, which races across instances otherwise. Also drives
+    // the round-end face-up pause → next-round deal.
     const expired = await withLock(this.pub, roomId, async () => {
       const fresh = await this.store.load(roomId);
       if (!fresh) return false;
       this.cache.set(roomId, fresh);
+      let changed = false;
       if (fresh.phase === "picking" && isExpired(fresh)) {
         expireTimer(fresh);
-        await this.maybeScore(fresh);
+        changed = true;
+      }
+      if (isRevealDue(fresh)) {
+        advanceFromReveal(fresh);
+        changed = true;
+      }
+      if (changed) {
         await this.persist(fresh);
-        return true;
+        return true; // publish outside the lock
       }
       return false;
     });
@@ -314,17 +335,34 @@ export class GameHub {
   }
 
   private safeView(state: GameState, forClientId: string | null) {
-    const players = state.players.map((p): SafePlayerView => ({
-      clientId: p.clientId,
-      name: p.name,
-      handCount: p.hand.length,
-      placed: p.placed.map((pl) => ({ lane: pl.lane, card: pl.card })),
-      ready: p.ready,
-      online: p.online,
-    }));
-
-    // Reveal hands only when game over or when it's your own view.
+    const pickingRound = state.round?.round ?? null;
     const revealAll = state.phase === "revealing" || state.phase === "scored";
+
+    const players = state.players.map((p): SafePlayerView => {
+      const isSelf = p.clientId === forClientId;
+      return {
+        clientId: p.clientId,
+        name: p.name,
+        handCount: p.hand.length,
+        placedThisRound: p.placedThisRound,
+        placed: p.placed.map((pl) => ({
+          lane: pl.lane,
+          round: pl.round,
+          // Realtime action visibility: while picking, OTHERS see this round's
+          // fresh placements as face-down backs; own cards + older rounds
+          // (already flipped at a previous round-end) stay visible.
+          card:
+            !revealAll && !isSelf && pl.round === pickingRound
+              ? null
+              : pl.card,
+        })),
+        ready: p.ready,
+        online: p.online,
+      };
+    });
+
+    // Own hand is always private-visible; revealing shows it too (it's swept
+    // right after anyway).
     const me = state.players.find((p) => p.clientId === forClientId);
 
     return {
@@ -333,8 +371,9 @@ export class GameHub {
       mustPlace: state.round?.mustPlace ?? 0,
       mustDiscard: state.round?.mustDiscard ?? false,
       deadlineMs: state.round?.deadlineMs ?? null,
+      revealUntilMs: state.revealUntilMs,
       players,
-      myHand: me && !revealAll ? me.hand : [],
+      myHand: me?.hand ?? [],
       allHands:
         revealAll && state.finalLanes
           ? Object.fromEntries(

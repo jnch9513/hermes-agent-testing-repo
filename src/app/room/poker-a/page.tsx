@@ -14,11 +14,12 @@ import {
 import { ThemeToggle } from "@/components/theme-toggle";
 
 type Card = { rank: number; suit: string };
-type Placed = { lane: string; card: Card };
+type Placed = { lane: string; card: Card | null; round?: number };
 type PlayerView = {
   clientId: string;
   name: string;
   handCount: number;
+  placedThisRound: number;
   placed: Placed[];
   ready: boolean;
   online: boolean;
@@ -29,6 +30,7 @@ type GameStateView = {
   mustPlace: number;
   mustDiscard: boolean;
   deadlineMs: number | null;
+  revealUntilMs?: number | null;
   players: PlayerView[];
   myHand: Card[];
   allHands: Record<string, { top: string[]; middle: string[]; bottom: string[] }> | null;
@@ -37,12 +39,71 @@ type GameStateView = {
 
 const KEY = "hw_user";
 const SUIT_ORDER: Record<string, number> = { "♠": 0, "♥": 1, "♦": 2, "♣": 3 };
+const RANK_LABEL: Record<number, string> = { 11: "J", 12: "Q", 13: "K", 14: "A" };
+const IS_RED = (suit: string) => suit === "♥" || suit === "♦";
 
-function cardLabel(c: Card): string {
-  const labels: Record<number, string> = {
-    11: "J", 12: "Q", 13: "K", 14: "A",
-  };
-  return `${labels[c.rank] ?? c.rank}${c.suit}`;
+function rankLabel(rank: number): string {
+  return RANK_LABEL[rank] ?? String(rank);
+}
+
+/** Real playing-card look: corner index + big centre pip. */
+function PlayingCard({
+  card,
+  size = "md",
+  className = "",
+}: {
+  card: Card | null; // null = face-down back
+  size?: "sm" | "md" | "lg";
+  className?: string;
+}) {
+  if (!card) {
+    // Card back
+    return (
+      <div
+        className={`relative shrink-0 rounded-md border border-slate-700 bg-gradient-to-br from-blue-900 to-slate-900 shadow-sm ${sizeClass(size)} ${className}`}
+      >
+        <div className="absolute inset-[3px] rounded-[4px] border border-white/20" />
+        <div className="flex h-full items-center justify-center text-white/40">
+          <span className={size === "lg" ? "text-lg" : "text-xs"}>🎴</span>
+        </div>
+      </div>
+    );
+  }
+  const red = IS_RED(card.suit);
+  return (
+    <div
+      className={`relative shrink-0 rounded-md border border-zinc-300 bg-white shadow-sm dark:border-zinc-500 ${sizeClass(size)} ${className}`}
+    >
+      {/* corner index */}
+      <div
+        className={`absolute left-0.5 top-0 leading-none font-semibold ${
+          red ? "text-red-600" : "text-zinc-900"
+        } ${size === "sm" ? "text-[8px]" : size === "md" ? "text-[10px]" : "text-xs"}`}
+      >
+        {rankLabel(card.rank)}
+        <br />
+        {card.suit}
+      </div>
+      {/* centre pip */}
+      <div className="flex h-full items-center justify-center">
+        <span
+          className={`${red ? "text-red-600" : "text-zinc-900"} ${
+            size === "sm" ? "text-base" : size === "md" ? "text-xl" : "text-3xl"
+          }`}
+        >
+          {card.suit}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function sizeClass(size: "sm" | "md" | "lg"): string {
+  return size === "sm"
+    ? "h-10 w-7"
+    : size === "md"
+      ? "h-14 w-10"
+      : "h-20 w-14";
 }
 
 export default function GameRoom() {
@@ -52,7 +113,6 @@ export default function GameRoom() {
   const [conn, setConn] = useState<ConnectionState>("connecting");
   const [game, setGame] = useState<GameStateView | null>(null);
   const [selected, setSelected] = useState<Card[]>([]);
-  const [targetLane, setTargetLane] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(Date.now());
   const sentHello = useRef(false);
@@ -67,6 +127,7 @@ export default function GameRoom() {
           mustPlace: msg.mustPlace,
           mustDiscard: msg.mustDiscard,
           deadlineMs: msg.deadlineMs,
+          revealUntilMs: msg.revealUntilMs ?? null,
           players: msg.players,
           myHand: msg.myHand ?? [],
           allHands: msg.allHands ?? null,
@@ -86,30 +147,32 @@ export default function GameRoom() {
   );
   useEffect(() => setConn(connectionState), [connectionState]);
 
-  // tick for countdown
+  // tick for countdown / reveal countdown / nudge checks
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 500);
     return () => clearInterval(t);
   }, []);
 
-  // Nudge: when the timer hits 0 but nobody has acted since, keep pinging the
-  // server so the lazy expiry settles the round (serverless has no timers).
+  // Nudge server while a phase deadline has passed but nothing advanced yet
+  // (serverless has no timers — clients drive lazy expiry).
   useEffect(() => {
-    if (game?.phase !== "picking" || !game.deadlineMs) return;
-    const deadline = game.deadlineMs;
+    if (!game) return;
+    const deadline =
+      game.phase === "picking" ? game.deadlineMs :
+      game.phase === "revealing" ? game.revealUntilMs ?? null : null;
+    if (!deadline) return;
     const t = setInterval(() => {
-      if (Date.now() >= deadline) {
-        send(JSON.stringify({ type: "game:nudge" }));
-      }
+      if (Date.now() >= deadline) send(JSON.stringify({ type: "game:nudge" }));
     }, 2000);
     return () => clearInterval(t);
-  }, [game?.phase, game?.deadlineMs, send]);
+  }, [game?.phase, game?.deadlineMs, game?.revealUntilMs, send]);
 
   const login = () => {
     const name = nameInput.trim();
     if (!name) return;
-    localStorage.setItem(KEY, JSON.stringify({ userId: crypto.randomUUID(), name }));
-    setMe({ userId: crypto.randomUUID(), name });
+    const id = crypto.randomUUID();
+    localStorage.setItem(KEY, JSON.stringify({ userId: id, name }));
+    setMe({ userId: id, name });
   };
 
   useEffect(() => {
@@ -121,9 +184,7 @@ export default function GameRoom() {
   useEffect(() => {
     if (!me || conn !== "connected") return;
     if (!sentHello.current || true) {
-      send(
-        JSON.stringify({ type: "hello", clientId: me.userId, name: me.name })
-      );
+      send(JSON.stringify({ type: "hello", clientId: me.userId, name: me.name }));
       sentHello.current = true;
     }
   }, [me, conn, send]);
@@ -132,7 +193,7 @@ export default function GameRoom() {
   useEffect(() => {
     if (!me || conn !== "connected") return;
     send(JSON.stringify({ type: "game:join", name: me.name }));
-  }, [me, conn, game?.phase === undefined, send]);
+  }, [me, conn, send]);
 
   const act = useCallback(
     (obj: object) => {
@@ -147,15 +208,10 @@ export default function GameRoom() {
     setSelected((prev) => {
       const exists = prev.find((c) => c.rank === card.rank && c.suit === card.suit);
       if (exists) return prev.filter((c) => !(c.rank === card.rank && c.suit === card.suit));
-      // limit selection: remaining placements this round
       const mine = game.players.find((p) => p.clientId === me?.userId);
-      const alreadyPlaced = mine ? countMyPlacedThisRound(mine) : 0;
-      const canPlaceMore =
-        mine && game.mustPlace > 0
-          ? game.mustPlace - Math.min(alreadyPlaced, game.mustPlace)
-          : 0;
-      const needDiscard = game.mustDiscard && alreadyPlaced >= game.mustPlace;
-      if (!needDiscard && canPlaceMore <= prev.length) return prev;
+      const placedThisRound = mine?.placedThisRound ?? 0;
+      const canPlaceMore = Math.max(0, game.mustPlace - placedThisRound);
+      if (canPlaceMore <= prev.length) return prev;
       return [...prev, card];
     });
   };
@@ -164,24 +220,23 @@ export default function GameRoom() {
     if (selected.length !== 1 || !me) return;
     act({ type: "game:place", card: selected[0], lane });
     setSelected([]);
-    setTargetLane(null);
   };
 
-  const discardSelected = () => {
-    if (selected.length !== 1) return;
-    act({ type: "game:discard", card: selected[0] });
-    setSelected([]);
-  };
-
-  const countMyPlacedThisRound = (p: PlayerView): number => {
-    // Server tracks this; approximate from UI by total placed vs known rounds.
-    // For simplicity show server-provided state; the engine enforces limits.
-    return p.placed.length % 100; // placeholder — server enforces real limit
+  const pullBack = (pl: Placed) => {
+    if (!pl.card) return;
+    act({ type: "game:unplace", card: pl.card, lane: pl.lane });
   };
 
   // ---- derived
   const secondsLeft = game?.deadlineMs ? Math.max(0, Math.ceil((game.deadlineMs - now) / 1000)) : null;
+  const revealLeft = game?.revealUntilMs && game.phase === "revealing" ? Math.max(0, Math.ceil((game.revealUntilMs - now) / 1000)) : null;
   const meInGame = game?.players.find((p) => p.clientId === me?.userId);
+  const pickingRound = game?.round ?? null;
+  const myPlacedThisRound = meInGame?.placedThisRound ?? 0;
+  const canPlaceMore = game ? Math.max(0, game.mustPlace - myPlacedThisRound) : 0;
+  const readyEnabled = !!game && game.phase === "picking" && myPlacedThisRound >= game.mustPlace;
+  // R2-4: after placing enough, leftover hand cards are locked (✕) — implicit discard.
+  const lockHand = !!game && game.phase === "picking" && readyEnabled;
 
   // login gate
   if (!me) {
@@ -209,9 +264,16 @@ export default function GameRoom() {
     waiting: "等緊人",
     dealing: "派牌中",
     picking: `第 ${game?.round} 回 · 揀牌`,
-    revealing: "開牌！",
+    revealing: `第 ${game?.round} 回完成 · 全桌翻開`,
     scored: "結算",
   };
+
+  // Display order: 上(top×3) → 中(middle×5) → 下(bottom×5)
+  const LANES = [
+    { key: "top", label: "上 ×3" },
+    { key: "middle", label: "中 ×5" },
+    { key: "bottom", label: "下 ×5" },
+  ] as const;
 
   return (
     <main className="mx-auto flex min-h-screen max-w-4xl flex-col gap-4 p-4 bg-background text-foreground">
@@ -244,15 +306,15 @@ export default function GameRoom() {
           {phaseLabel[game?.phase ?? "waiting"] ?? game?.phase}
         </Badge>
         {secondsLeft !== null && game?.phase === "picking" && (
-          <span className={`font-mono font-bold ${secondsLeft <= 5 ? "text-red-500" : ""}`}>
+          <span className={`font-mono font-bold ${secondsLeft <= 10 ? "text-red-500" : ""}`}>
             ⏱ {secondsLeft}s
           </span>
         )}
-        {game?.mustDiscard && game.phase === "picking" && (
-          <span className="text-xs text-muted-foreground">要揀 {game.mustPlace} 張擺 + 棄 1 張</span>
+        {revealLeft !== null && (
+          <span className="font-mono font-bold text-amber-500">翻開中 · {revealLeft}s</span>
         )}
-        {!game?.mustDiscard && game?.phase === "picking" && (
-          <span className="text-xs text-muted-foreground">要擺 {game.mustPlace} 張</span>
+        {game?.phase === "picking" && (
+          <span className="text-xs text-muted-foreground">要擺 {game.mustPlace} 張（已擺 {myPlacedThisRound}）</span>
         )}
         {error && <span className="text-xs font-medium text-red-500">{error}</span>}
       </div>
@@ -321,20 +383,24 @@ export default function GameRoom() {
                       )}
                     </div>
                   </CardContent>
-                  {/* their lanes mini-view */}
+                  {/* their lanes mini-view — fresh picks show as face-down backs */}
                   <div className="mt-2 flex gap-1 px-4 pb-1">
-                    {(["top", "middle", "bottom"] as const).map((lane) => {
-                      const cards = p.placed.filter((pl) => pl.lane === lane);
+                    {LANES.map(({ key }) => {
+                      const cards = p.placed.filter((pl) => pl.lane === key);
                       return (
                         <div
-                          key={lane}
-                          className="min-h-8 flex-1 rounded border border-dashed border-border/60 p-0.5 text-[10px]"
+                          key={key}
+                          className="min-h-8 flex-1 rounded border border-dashed border-border/60 p-0.5"
                         >
-                          {cards.map((pl, i) => (
-                            <span key={i} className="mx-px inline-block rounded bg-accent px-0.5">
-                              {cardLabel(pl.card)}
-                            </span>
-                          ))}
+                          <div className="flex flex-wrap gap-px">
+                            {cards.map((pl, i) =>
+                              pl.card ? (
+                                <PlayingCard key={i} card={pl.card} size="sm" className="scale-[0.8] origin-left" />
+                              ) : (
+                                <PlayingCard key={i} card={null} size="sm" className="scale-[0.8] origin-left" />
+                              )
+                            )}
+                          </div>
                         </div>
                       );
                     })}
@@ -343,45 +409,59 @@ export default function GameRoom() {
               ))}
           </div>
 
-          {/* reveal overlay info */}
-          {game.phase === "revealing" && game.allHands && (
-            <Card className="border-amber-500/50">
-              <CardContent className="pt-4 text-sm">全部開牌…</CardContent>
-            </Card>
-          )}
-
-          {/* my board: three lanes */}
+          {/* my board: 上 → 中 → 下 */}
           <Card>
             <CardHeader className="pb-2">
               <CardTitle className="text-sm font-medium text-muted-foreground">
-                我嘅十三張（頭3 · 中5 · 尾5）
+                我嘅十三張（上3 · 中5 · 下5）
+                {game.phase === "picking" && canPlaceMore > 0 && selected.length === 1 && (
+                  <span className="ml-2 text-emerald-600">— 撳條 lane 放落去</span>
+                )}
+                {game.phase === "picking" && myPlacedThisRound > 0 && (
+                  <span className="ml-2 text-muted-foreground">（綠框 = 本回合，可以撳返上手）</span>
+                )}
               </CardTitle>
             </CardHeader>
             <CardContent className="flex flex-col gap-2">
-              {(["bottom", "middle", "top"] as const).map((lane) => {
-                const laneName = lane === "top" ? "頭道 ×3" : lane === "middle" ? "中道 ×5" : "尾道 ×5";
-                const cards = meInGame?.placed.filter((pl) => pl.lane === lane) ?? [];
-                const isTarget = targetLane === lane;
+              {LANES.map(({ key, label }) => {
+                const cards = meInGame?.placed.filter((pl) => pl.lane === key) ?? [];
+                const isTarget = selected.length === 1 && game.phase === "picking";
                 return (
                   <button
-                    key={lane}
-                    disabled={!isTarget && targetLane !== null}
-                    onClick={() => isTarget && placeSelected(lane)}
-                    className={`flex min-h-12 items-center gap-1.5 rounded-lg border p-2 text-left transition-colors ${
+                    key={key}
+                    disabled={!isTarget}
+                    onClick={() => isTarget && placeSelected(key)}
+                    className={`flex min-h-16 items-center gap-2 rounded-lg border p-2 text-left transition-colors ${
                       isTarget
                         ? "border-emerald-500 bg-emerald-500/10 ring-1 ring-emerald-500/40"
                         : "border-border"
-                    } ${targetLane !== null && !isTarget ? "opacity-40" : ""}`}
+                    }`}
                   >
-                    <span className="mr-1 w-14 shrink-0 text-xs text-muted-foreground">{laneName}</span>
-                    {cards.map((pl, i) => (
-                      <span key={i} className="rounded bg-accent px-1.5 py-0.5 font-mono text-sm">
-                        {cardLabel(pl.card)}
-                      </span>
-                    ))}
-                    {cards.length === 0 && (
-                      <span className="text-xs text-muted-foreground/50">— 空 —</span>
-                    )}
+                    <span className="mr-1 w-12 shrink-0 text-xs text-muted-foreground">{label}</span>
+                    <span className="flex flex-wrap gap-1">
+                      {cards.map((pl, i) => {
+                        const adjustable =
+                          game.phase === "picking" && pl.round === pickingRound;
+                        return (
+                          <span
+                            key={i}
+                            role={adjustable ? "button" : undefined}
+                            title={adjustable ? "撳一下收返上手" : undefined}
+                            onClick={(e) => {
+                              if (!adjustable) return;
+                              e.stopPropagation();
+                              pullBack(pl);
+                            }}
+                            className={`relative inline-block ${adjustable ? "-translate-y-0.5 cursor-pointer ring-2 ring-emerald-500 rounded-md" : ""}`}
+                          >
+                            <PlayingCard card={pl.card} size="sm" />
+                          </span>
+                        );
+                      })}
+                      {cards.length === 0 && (
+                        <span className="text-xs text-muted-foreground/50">— 空 —</span>
+                      )}
+                    </span>
                   </button>
                 );
               })}
@@ -391,54 +471,47 @@ export default function GameRoom() {
           {/* my hand */}
           <Card>
             <CardHeader className="pb-2">
-              <CardTitle className="flex items-center justify-between text-sm font-medium text-muted-foreground">
-                <span>
-                  手牌（{game.myHand.length}）
-                  {game.phase === "picking" && (
-                    selected.length === 1 ? (
-                      game.mustDiscard && meInGame && myPlacedThisRound(game, me.userId) >= game.mustPlace
-                        ? " — 揀好咗，撳「棄呢張」"
-                        : " — 揀條 lane 放落去"
-                    ) : (
-                      ""
-                    )
-                  )}
-                </span>
-                {selected.length === 1 && game.phase === "picking" && (
-                  <div className="flex gap-2">
-                    {myPlacedThisRound(game, me.userId) >= game.mustPlace && game.mustDiscard ? (
-                      <Button size="sm" variant="destructive" onClick={discardSelected}>
-                        棄呢張
-                      </Button>
-                    ) : (
-                      <>
-                        {(["top", "middle", "bottom"] as const).map((l) => (
-                          <Button key={l} size="sm" variant="outline" onClick={() => placeSelected(l)}>
-                            放{["頭", "中", "尾"][["top","middle","bottom"].indexOf(l)]}道
-                          </Button>
-                        ))}
-                      </>
-                    )}
-                  </div>
+              <CardTitle className="text-sm font-medium text-muted-foreground">
+                手牌（{game.myHand.length}）
+                {lockHand && (
+                  <span className="ml-2 text-amber-600">
+                    剩低嗰張會喺回合結束自動棄走 — 撳「準備好」開牌
+                  </span>
                 )}
               </CardTitle>
             </CardHeader>
-            <CardContent className="flex min-h-16 flex-wrap content-start gap-1.5">
+            <CardContent className="flex min-h-24 flex-wrap content-start gap-2">
               {[...game.myHand]
                 .sort((x, y) => y.rank - x.rank || SUIT_ORDER[x.suit] - SUIT_ORDER[y.suit])
-                .map((c) => {
+                .map((c, idx) => {
                   const sel = selected.some((s) => s.rank === c.rank && s.suit === c.suit);
+                  const isLockedLast = lockHand && game.myHand.length - idx === 1; // rightmost leftover
+                  const disabled = lockHand || game.phase !== "picking" || canPlaceMore === 0;
                   return (
                     <button
                       key={`${c.rank}${c.suit}`}
                       onClick={() => toggleSelect(c)}
-                      className={`rounded-md border px-2.5 py-1.5 font-mono text-sm transition-all ${
-                        sel
-                          ? "-translate-y-1 border-emerald-500 bg-emerald-500/15 ring-1 ring-emerald-500/50"
-                          : "border-border hover:border-foreground/30"
-                      }`}
+                      disabled={disabled}
+                      className={`relative rounded-md transition-all ${
+                        sel ? "-translate-y-1.5" : ""
+                      } ${disabled ? "cursor-not-allowed opacity-90" : "hover:-translate-y-0.5"}`}
                     >
-                      {cardLabel(c)}
+                      <PlayingCard
+                        card={c}
+                        size="lg"
+                        className={
+                          sel
+                            ? "!border-emerald-500 ring-2 ring-emerald-500/60"
+                            : disabled
+                              ? "grayscale-[35%]"
+                              : ""
+                        }
+                      />
+                      {isLockedLast && (
+                        <span className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-red-600 text-[11px] font-bold text-white shadow">
+                          ✕
+                        </span>
+                      )}
                     </button>
                   );
                 })}
@@ -493,10 +566,11 @@ export default function GameRoom() {
               <Button
                 size="lg"
                 variant="outline"
+                disabled={!readyEnabled}
                 onClick={() => act({ type: "game:ready" })}
                 className="bg-background shadow-lg"
               >
-                ✓ 準備好
+                ✓ 準備好{readyEnabled ? "" : `（仲擺 ${canPlaceMore} 張）`}
               </Button>
             </div>
           )}
@@ -504,13 +578,4 @@ export default function GameRoom() {
       )}
     </main>
   );
-}
-
-function myPlacedThisRound(game: GameStateView, clientId: string): number {
-  // The engine enforces real limits; this is a rough UI estimate based on hand size.
-  // R1: started with 5; R2-4: 3; R5: 2.
-  const me = game.players.find((p) => p.clientId === clientId);
-  if (!me) return 0;
-  const startSize = game.round === 1 ? 5 : game.round === 5 ? game.players.length > 0 ? 2 : 2 : 3;
-  return Math.max(0, startSize - game.myHand.length);
 }

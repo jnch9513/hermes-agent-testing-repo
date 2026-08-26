@@ -7,8 +7,10 @@ import { dealCards, moveToDiscard, newPiles, Piles } from "./deck";
 import {
   GameState,
   LANE_CAPACITY,
+  Lane,
   Phase,
   PlayerGameView,
+  REVEAL_PAUSE_MS,
   ROUND_PLAN,
   ROUND_SECONDS,
   RoundInfo,
@@ -36,6 +38,8 @@ export function createGame(roomId: string): GameState {
     drawPile: [],
     discardPile: [],
     round: null,
+    revealUntilMs: null,
+    pendingNextRound: null,
     finalLanes: null,
     scores: null,
     createdAt: Date.now(),
@@ -155,7 +159,7 @@ export function placeCard(
   }
 
   p.hand.splice(idx, 1);
-  p.placed.push({ lane, card });
+  p.placed.push({ lane, card, round: state.round?.round });
   p.placedThisRound++;
 
   maybeCompleteRound(state);
@@ -180,12 +184,36 @@ export function discardCard(state: GameState, clientId: string, card: Card): Gam
   return state;
 }
 
+/**
+ * Pull a card back from a lane into hand. Only THIS round's placements are
+ * adjustable (規則: 舊回合擺嘅牌唔郁得). Unlimited re-adjusts within the round.
+ */
+export function unplaceCard(state: GameState, clientId: string, card: Card, lane: Lane): GameState {
+  assertPicking(state);
+  const p = requirePlayer(state, clientId);
+  if (!state.round) throw new Error("no active round");
+  const idx = p.placed.findIndex(
+    (pl) => pl.lane === lane && pl.card && cardId(pl.card) === cardId(card)
+  );
+  if (idx === -1) throw new Error("card not in that lane");
+  if ((p.placed[idx].round ?? state.round.round) !== state.round.round) {
+    throw new Error("only this round's cards can be pulled back");
+  }
+  const [entry] = p.placed.splice(idx, 1);
+  p.hand.push(entry.card);
+  p.placedThisRound = Math.max(0, p.placedThisRound - 1);
+  p.ready = false;
+  return state;
+}
+
 export function setReady(state: GameState, clientId: string, ready: boolean): GameState {
   assertPicking(state);
   const p = requirePlayer(state, clientId);
   // Ready only counts when the player has finished all required actions.
+  // Discard requirement is satisfied implicitly: the leftover card stays in
+  // hand until round end (no discard UI — KC).
   if (ready && !playerRoundDone(p, state.round!)) {
-    throw new Error("finish placing/discarding first");
+    throw new Error("finish placing first");
   }
   p.ready = ready;
   maybeCompleteRound(state);
@@ -193,9 +221,22 @@ export function setReady(state: GameState, clientId: string, ready: boolean): Ga
 }
 
 function playerRoundDone(p: PlayerGameView, round: RoundInfo): boolean {
-  const placedOk = p.placedThisRound >= round.mustPlace;
-  const discardOk = !round.mustDiscard || handCount(p) === 0;
-  return placedOk && discardOk;
+  // mustDiscard no longer blocks readiness: the leftover card rides in hand
+  // and is swept to the discard pile at completeRound.
+  return p.placedThisRound >= round.mustPlace;
+}
+
+/**
+ * Sweep each player's leftover hand into the discard pile at round end
+ * (R2-4: the undiscarded 3rd card; R5/others: normally empty already).
+ */
+function sweepHandsToDiscard(state: GameState): void {
+  for (const p of state.players) {
+    if (p.hand.length > 0) {
+      moveToDiscard({ draw: state.drawPile, discard: state.discardPile }, p.hand);
+      p.hand = [];
+    }
+  }
 }
 
 function maybeCompleteRound(state: GameState): void {
@@ -210,23 +251,24 @@ function maybeCompleteRound(state: GameState): void {
 export function expireTimer(state: GameState, rng: () => number = Math.random): GameState {
   if (state.phase !== "picking" || !state.round) return state;
 
+  const mustPlace = state.round.mustPlace;
   for (const p of state.players) {
-    // Auto-place up to mustPlace using simple heuristic: fill bottom→middle→top
-    while (p.placedThisRound < state.round.mustPlace && p.hand.length > 0) {
-      const before = p.hand.length;
-      for (const lane of ["bottom", "middle", "top"] as const) {
-        const laneUsed = p.placed.filter((pl) => pl.lane === lane).length;
-        if (laneUsed >= LANE_CAPACITY[lane]) continue;
-        placeCardInternal(state, p, p.hand[p.hand.length - 1], lane);
-        break;
+    if (p.placedThisRound < mustPlace) {
+      // Auto-place the rest: fill lanes bottom→middle→top (KC: 未擺哂 幫佢 random).
+      while (p.placedThisRound < mustPlace && p.hand.length > 0) {
+        const before = p.hand.length;
+        for (const lane of ["bottom", "middle", "top"] as const) {
+          const laneUsed = p.placed.filter((pl) => pl.lane === lane).length;
+          if (laneUsed >= LANE_CAPACITY[lane]) continue;
+          placeCardInternal(state, p, p.hand[p.hand.length - 1], lane);
+          break;
+        }
+        if (p.hand.length === before) break; // no lane could take a card
       }
-      if (p.hand.length === before) break; // no lane could take a card
     }
-    if (state.round.mustDiscard && p.hand.length > 0) {
-      const [discarded] = p.hand.splice(0, 1);
-      moveToDiscard({ draw: state.drawPile, discard: state.discardPile }, [discarded]);
-    }
+    // Leftover hand rides until round end — sweepHandsToDiscard handles it.
     p.ready = true;
+    void rng;
   }
   completeRound(state);
   return state;
@@ -236,26 +278,55 @@ function placeCardInternal(
   state: GameState,
   p: PlayerGameView,
   card: Card,
-  lane: "top" | "middle" | "bottom"
+  lane: Lane
 ): void {
   const idx = p.hand.findIndex((c) => cardId(c) === cardId(card));
   if (idx === -1) return;
   const laneUsed = p.placed.filter((pl) => pl.lane === lane).length;
   if (laneUsed >= LANE_CAPACITY[lane]) return;
   p.hand.splice(idx, 1);
-  p.placed.push({ lane, card });
+  p.placed.push({ lane, card, round: state.round?.round });
 }
 
 function completeRound(state: GameState): void {
   const roundNum = state.round!.round;
-  // Move this round's placed cards into persistent per-player lane tracking:
-  // we keep them inside `placed` until game end, then split by lane.
-
+  // Sweep leftover hands to discard (R2-4: undiscarded 3rd card stays in hand
+  // until round end — no discard UI, KC). Then flip all placements face-up:
+  // phase=revealing shows every card to everyone for REVEAL_PAUSE_MS before
+  // the next round is dealt.
+  sweepHandsToDiscard(state);
   if (roundNum >= 5) {
     finishGame(state);
-  } else {
-    beginRound(state, roundNum + 1, Math.random);
+    return;
   }
+  state.phase = "revealing";
+  state.revealUntilMs = Date.now() + REVEAL_PAUSE_MS;
+  state.pendingNextRound = roundNum + 1;
+}
+
+/** Is the round-end face-up pause over? */
+export function isRevealDue(state: GameState, nowMs: number = Date.now()): boolean {
+  return (
+    state.phase === "revealing" &&
+    state.revealUntilMs !== null &&
+    !state.finalLanes && // game-over reveal is handled by scoring, not the pause
+    nowMs >= state.revealUntilMs
+  );
+}
+
+/** After the face-up pause: deal the next round. */
+export function advanceFromReveal(state: GameState, rng: () => number = Math.random): GameState {
+  if (!isRevealDue(state)) return state;
+  const next = state.pendingNextRound;
+  state.revealUntilMs = null;
+  state.pendingNextRound = null;
+  if (next !== null && next >= 2 && next <= 5) {
+    beginRound(state, next, rng);
+  } else {
+    // Nothing pending — shouldn't happen, but don't wedge the room.
+    finishGame(state);
+  }
+  return state;
 }
 
 
