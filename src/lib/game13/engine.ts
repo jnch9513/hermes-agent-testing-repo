@@ -44,6 +44,7 @@ export function createGame(roomId: string): GameState {
 
 export function joinGame(state: GameState, clientId: string, name: string): GameState {
   if (state.phase !== "waiting") throw new Error("game already started");
+  if (!clientId) throw new Error("not identified yet (no hello)"); // ghost-seat guard
   if (state.players.some((p) => p.clientId === clientId)) return state; // rejoin = no-op
   if (state.players.length >= MAX_PLAYERS) throw new Error("table full (4)");
   state.players.push({

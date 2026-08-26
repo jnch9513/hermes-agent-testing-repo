@@ -123,6 +123,7 @@ export class GameHub {
             break;
           }
           case "game:join": {
+            if (!clientId) throw new Error("not identified yet (no hello)");
             let state = await this.store.load(roomId);
             // Auto-restart flow: joining a scored/absent game starts a fresh one.
             if (!state || state.phase === "scored") {

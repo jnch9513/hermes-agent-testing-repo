@@ -97,14 +97,17 @@ export class PresenceHub {
 
       if (frame.type === 'hello') {
         state.clientId = frame.clientId
-        this.infoByClient.set(frame.clientId, { name: frame.name, room: null })
-        await this.store.touch([[frame.clientId, { name: frame.name, room: null }]])
+        // Bind the game hub SYNCHRONOUSLY before any await — the client fires
+        // game:join immediately after connect, and if registration is still
+        // pending the join gets processed with clientId=undefined (ghost seat).
         if (gameHub) {
           // Default game room binding: poker-a hosts Lucky 13.
           currentGameRoom = 'poker-a'
           gameHub.registerSocket(currentGameRoom, ws)
           gameHub.bindClient(currentGameRoom, ws, frame.clientId)
         }
+        this.infoByClient.set(frame.clientId, { name: frame.name, room: null })
+        await this.store.touch([[frame.clientId, { name: frame.name, room: null }]])
         await this.broadcastPresence()
       }
 
